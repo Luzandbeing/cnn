@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Extract a sentence list from a PDF into transcript.json for English study.
 
-Handles the common "bilingual subtitle/transcript PDF" shape: numbered lines
-where each item holds an English sentence followed by its Chinese translation.
-Also handles plain English PDFs (then every item has an empty Chinese field).
+Handles two PDF shapes:
+
+* **numbered** — subtitle/transcript sheets where each line starts with a number and
+  the English sentence is followed by its Chinese translation;
+* **prose** — running text (articles, podcast transcripts, book chapters) that is
+  joined into paragraphs and split into sentences automatically.
 
 Self-bootstrapping: when PyMuPDF is missing this script creates a virtualenv
 (default: <cwd>/.english-study/venv), installs PyMuPDF into it, and re-executes
@@ -11,7 +14,8 @@ itself with that interpreter. Set ENGLISH_STUDY_VENV=<dir> to use another venv.
 
 Usage:
     python3 extract_pdf.py SOURCE.pdf [-o transcript.json] [--format json|text|md]
-                                       [--pages 1-5] [--min-items 1]
+                                       [--mode auto|number|prose] [--pages 1-5]
+                                       [--min-items 1]
 """
 
 from __future__ import annotations
@@ -127,6 +131,9 @@ NOISE_PATTERNS = (
     re.compile(r"小鹦看看|Pollykann"),
     re.compile(r"台词本|字幕由|自动生成"),
     re.compile(r"^\s*https?://\S+\s*$"),
+    # document headers that are not part of the text being studied
+    re.compile(r"^\s*Transcript\s*[:：]"),
+    re.compile(r"^\s*(?:Page|第)\s*\d+\s*(?:页|of\s+\d+)?\s*$"),
 )
 
 ITEM_RE = re.compile(r"^[ \t]*(\d{1,4})[ \t]+(?=\S)")
@@ -179,6 +186,125 @@ def collect_lines(doc, page_from: int, page_to: int) -> list[tuple[int, str]]:
     return lines
 
 
+def collect_blocks(doc, page_from: int, page_to: int) -> list[list[tuple[int, str]]]:
+    """Paragraph blocks as [(page, line), …] for prose documents.
+
+    A blank line starts a new block; a page break does not, because sentences in
+    a typeset PDF run across pages.
+    """
+    blocks: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    for number in range(page_from, page_to + 1):
+        page = doc.load_page(number - 1)
+        for raw_line in normalize(page.get_text()).splitlines():
+            line = raw_line.rstrip()
+            if not line.strip():
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
+            if is_noise(line):
+                continue
+            current.append((number, line))
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+# periods that do not end a sentence; the placeholder keeps offsets 1:1
+ABBREVIATIONS = (
+    "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "St.", "Jr.", "Sr.", "vs.", "etc.",
+    "e.g.", "i.e.", "cf.", "U.S.", "U.K.", "a.m.", "p.m.", "Inc.", "Ltd.",
+)
+_PERIOD = "\x00"
+# only a standalone token counts: "podcast." must not be read as "St."
+ABBREVIATION_RE = re.compile(
+    r"(?<![A-Za-z])(?:" + "|".join(re.escape(item) for item in ABBREVIATIONS) + r")",
+    re.IGNORECASE,
+)
+# "No. 5" needs the digit lookahead, otherwise a sentence ending in "no." would be masked
+NUMBER_ABBREV_RE = re.compile(r"(?<![A-Za-z])No\.(?=\s*\d)", re.IGNORECASE)
+SENTENCE_END_RE = re.compile(r"[.!?][\"'”’)\]]*[ \t\n]+(?=[A-Z0-9\"'“‘(\[])")
+
+
+def protect_periods(text: str) -> str:
+    """Mask periods that cannot end a sentence, preserving the matched case."""
+    text = ABBREVIATION_RE.sub(lambda match: match.group(0)[:-1] + _PERIOD, text)
+    text = NUMBER_ABBREV_RE.sub(lambda match: match.group(0)[:-1] + _PERIOD, text)
+    return re.sub(r"(\d)\.(\d)", r"\1" + _PERIOD + r"\2", text)
+
+
+def split_sentences(text: str) -> list[tuple[int, str]]:
+    """Split prose into (start_offset, sentence) pairs.
+
+    Offsets point at the first character of the sentence in the input string, so
+    the caller can map a sentence back to the page it started on.
+    """
+    protected = protect_periods(text)
+    out: list[tuple[int, str]] = []
+    start = 0
+    for match in SENTENCE_END_RE.finditer(protected):
+        closing = re.match(r"[.!?][\"'”’)\]]*", protected[match.start():]).group(0)
+        end = match.start() + len(closing)
+        raw = protected[start:end]
+        sentence = raw.replace(_PERIOD, ".").strip()
+        if sentence:
+            out.append((start + (len(raw) - len(raw.lstrip())), sentence))
+        start = match.end()
+    tail = protected[start:].replace(_PERIOD, ".").strip()
+    if tail:
+        out.append((start, tail))
+    return out
+
+
+def page_for_offset(marks: list[tuple[int, int]], offset: int) -> int:
+    page = marks[0][1] if marks else 1
+    for start, mark_page in marks:
+        if start <= offset:
+            page = mark_page
+        else:
+            break
+    return page
+
+
+def parse_prose(blocks: list[list[tuple[int, str]]]) -> tuple[list[dict], list[str]]:
+    """Parse unnumbered prose: join wrapped lines, then split into sentences."""
+    items: list[dict] = []
+    warnings: list[str] = []
+    for block in blocks:
+        # join the wrapped lines of one paragraph, keeping hyphenated breaks
+        pieces: list[tuple[int, str, str]] = []
+        for page, line in block:
+            piece = line.strip()
+            if not piece:
+                continue
+            separator = " "
+            if pieces and pieces[-1][1].endswith("-") and piece[:1].islower():
+                separator = ""
+            pieces.append((page, piece, separator if pieces else ""))
+        parts: list[str] = []
+        marks: list[tuple[int, int]] = []
+        cursor = 0
+        for page, piece, separator in pieces:
+            if separator:
+                parts.append(separator)
+                cursor += len(separator)
+            marks.append((cursor, page))
+            parts.append(piece)
+            cursor += len(piece)
+        text = "".join(parts)
+        for offset, sentence in split_sentences(text):
+            items.append({
+                "n": len(items) + 1,
+                "page": page_for_offset(marks, offset),
+                "en": sentence,
+                "zh": "",
+            })
+    if not items:
+        warnings.append("prose mode found no sentences")
+    return items, warnings
+
+
 def parse_items(lines: list[tuple[int, str]]) -> tuple[list[dict], list[str]]:
     items: list[dict] = []
     warnings: list[str] = []
@@ -219,7 +345,8 @@ def parse_items(lines: list[tuple[int, str]]) -> tuple[list[dict], list[str]]:
 # --------------------------------------------------------------------------- #
 # output
 # --------------------------------------------------------------------------- #
-def build_document(pdf_path: Path, items: list[dict], pages: int, warnings: list[str], elapsed: float) -> dict:
+def build_document(pdf_path: Path, items: list[dict], pages: int, warnings: list[str], elapsed: float,
+                   mode: str = "number") -> dict:
     english_words = sum(len(re.findall(r"[A-Za-z][A-Za-z'’-]*", item["en"])) for item in items)
     bilingual = sum(1 for item in items if item["zh"])
     return {
@@ -232,6 +359,7 @@ def build_document(pdf_path: Path, items: list[dict], pages: int, warnings: list
         "stats": {
             "pages": pages,
             "items": len(items),
+            "mode": mode,
             "englishWords": english_words,
             "itemsWithChinese": bilingual,
             "bilingual": len(items) > 0 and bilingual >= len(items) * 0.6,
@@ -285,6 +413,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="json writes the file; text/md print to stdout")
     parser.add_argument("--pages", help="page range to extract, e.g. 1-5")
     parser.add_argument("--min-items", type=int, default=1, help="fail when fewer items are found")
+    parser.add_argument("--mode", choices=("auto", "number", "prose"), default="auto",
+                        help="number = numbered subtitle lines (default when present); "
+                             "prose = unnumbered running text split into sentences; auto tries both")
     args = parser.parse_args(argv)
 
     started = time.perf_counter()
@@ -296,17 +427,25 @@ def main(argv: list[str] | None = None) -> int:
     doc = pymupdf.open(pdf_path)
     try:
         page_from, page_to = parse_pages(args.pages, doc.page_count)
-        lines = collect_lines(doc, page_from, page_to)
-        items, warnings = parse_items(lines)
-        document = build_document(pdf_path, items, doc.page_count, warnings, time.perf_counter() - started)
+        items: list[dict] = []
+        warnings: list[str] = []
+        mode = "number"
+        if args.mode in ("auto", "number"):
+            items, warnings = parse_items(collect_lines(doc, page_from, page_to))
+        if args.mode == "prose" or (args.mode == "auto" and len(items) < 5):
+            prose_items, prose_warnings = parse_prose(collect_blocks(doc, page_from, page_to))
+            if args.mode == "prose" or len(prose_items) > len(items):
+                items, warnings, mode = prose_items, prose_warnings, "prose"
+        document = build_document(pdf_path, items, doc.page_count, warnings,
+                                  time.perf_counter() - started, mode)
     finally:
         doc.close()
 
     if len(items) < args.min_items:
         raise SystemExit(
-            f"[extract_pdf] found only {len(items)} numbered items in {pdf_path.name}. "
-            "This PDF may be a scan (no text layer) or not numbered; "
-            "try --pages or inspect the text layer first."
+            f"[extract_pdf] found only {len(items)} sentences in {pdf_path.name}. "
+            "This PDF may be a scan (no text layer) or use a layout neither mode handles; "
+            "try --mode prose, --pages, or inspect the text layer first."
         )
 
     if args.format in ("text", "md"):
@@ -317,8 +456,12 @@ def main(argv: list[str] | None = None) -> int:
     output.write_text(json.dumps(document, ensure_ascii=False, indent=1), encoding="utf-8")
     stats = document["stats"]
     print(f"[extract_pdf] {pdf_path.name}")
+    print(f"  mode       : {stats['mode']}")
     print(f"  items      : {stats['items']}  (pages {page_from}-{page_to} of {stats['pages']})")
     print(f"  english    : {stats['englishWords']} words, bilingual={stats['bilingual']}")
+    if not stats["bilingual"]:
+        print("  note       : source has no Chinese column; sentence translations are optional "
+              "(add a \"translations\" map to study.json) and the page hides the toggle")
     print(f"  written    : {output}")
     for warning in warnings[:5]:
         print(f"  warning    : {warning}")

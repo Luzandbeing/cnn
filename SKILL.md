@@ -26,19 +26,34 @@ containing this `SKILL.md`). Work in the session workspace, not in the skill dir
 python3 "$SKILL_DIR/scripts/extract_pdf.py" SOURCE.pdf -o "<out>/transcript.json"
 ```
 
-The script normalizes text (NFKC + CJK radical/punctuation repair), splits numbered lines
-into `{n, page, en, zh}` items, and prints a summary
-(`items`, `englishWords`, `bilingual`). It bootstraps its own venv with PyMuPDF on first
-run (default `<cwd>/.english-study/venv`, override with `ENGLISH_STUDY_VENV`); that first
-run needs network, later runs are offline.
+The script normalizes text (NFKC + CJK radical/punctuation repair), splits the document
+into `{n, page, en, zh}` items, and prints a summary (`mode`, `items`, `englishWords`,
+`bilingual`). It bootstraps its own venv with PyMuPDF on first run (default
+`<cwd>/.english-study/venv`, override with `ENGLISH_STUDY_VENV`); that first run needs
+network, later runs are offline.
+
+Two extraction modes are picked automatically (`--mode auto`):
+
+- **number** — subtitle/transcript sheets whose lines start with a sentence number and
+  pair English with Chinese.
+- **prose** — unnumbered running text (articles, podcast transcripts, book chapters):
+  wrapped lines are joined, paragraphs kept, and sentences split with abbreviation and
+  decimal awareness. Force one with `--mode number` / `--mode prose`.
 
 Read the summary before continuing:
 
 - `bilingual: true` — the PDF already pairs English with Chinese; keep that translation.
-- `bilingual: false` — a plain English PDF. Items have empty `zh`; either leave it empty
-  or write your own translation into `study.json`, not into the transcript.
+- `bilingual: false` — English-only source. Every `zh` is empty; the page then hides the
+  Chinese toggle and shows a 纯英文原文 badge. Optionally author Chinese for any subset of
+  sentences in `study.json` as `"translations": {"12": "…", "13": "…"}` (see step 2) —
+  never hand-edit `transcript.json`.
 - `items: 0` or a "may be a scan" error — the PDF has no text layer. Tell the user instead
   of inventing content; OCR is out of scope for this skill.
+
+In prose mode the sentence numbering is the extractor's, not the source's, so `ref` values
+refer to those numbers. Spot-check a few items with `--format text` before citing refs:
+spoken transcripts contain very long comma-heavy sentences (200+ characters) — that is
+correct, not a splitting failure.
 
 To read the extracted text (for your own analysis), do **not** paste the whole JSON into
 context; page through it:
@@ -97,7 +112,8 @@ dangling ones.
     {"type": "fill", "question": "… ______ (force) …", "answer": ["were forced", "was forced"],
      "explain": "…"},                                        // answer may be a string or a list
     {"type": "translate", "question": "翻译成英文：…", "answer": ["…"], "explain": "…"}
-  ]
+  ],
+  "translations": { "12": "只给需要的句子写中文对照（纯英文原文时才用）", "13": "…" }
 }
 ```
 
@@ -119,6 +135,10 @@ Rules that keep the page useful:
 - Exercises: mix meaning (vocabulary in context), form (word formation, tense, passive)
   and production (translation using the text's own patterns). `explain` should teach the
   rule, not just state the answer.
+- `translations` is only for English-only sources. Keep it to a subset the learner needs
+  (key openings, hard sentences) rather than machine-translating everything; the page shows
+  the toggle as soon as one sentence has Chinese. Keys that are not sentence numbers, or
+  that duplicate Chinese already present in the transcript, are reported as warnings.
 
 ### 3. Render
 
@@ -163,9 +183,11 @@ never rewrite the HTML by hand.
   sections hidden; 收藏句 is always present and shows an empty-state hint).
 - Deep links: `#sentences`, `#vocab`, `#starred`, … select a tab; `#s123` jumps to
   sentence 123, and `ref` links work across tabs.
-- Sentence list: Chinese hidden/shown as one toggle, per-sentence TTS (Web Speech API,
-  rate selectable), star/favourite, filter to starred or vocabulary-bearing sentences.
-  The `★ 收藏句 N` toolbar button flips straight to the starred-only view.
+- Sentence list: Chinese hidden/shown as one toggle (auto-hidden, with a 纯英文原文 badge,
+  when the source has no Chinese and no `translations` were authored), per-sentence TTS
+  (Web Speech API, rate selectable), star/favourite, filter to starred or
+  vocabulary-bearing sentences. The `★ 收藏句 N` toolbar button flips straight to the
+  starred-only view.
 - 收藏句 tab: starred sentences with Chinese, audio and a jump-back link, plus
   导出 Markdown (triggers a `.md` download and shows a selectable preview) and 清空收藏.
   Toggling a star anywhere refreshes the toolbar counter, the tab badge and any visible

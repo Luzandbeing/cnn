@@ -84,6 +84,23 @@ def validate(study: dict, transcript: dict) -> list[str]:
         if entry.get("answer") in (None, "", []):
             warnings.append(f"exercises[{index}] has no answer")
 
+    translations = study.get("translations")
+    if translations is not None:
+        if not isinstance(translations, dict):
+            raise SystemExit("[render_study] 'translations' must be a JSON object keyed by sentence number")
+        have_zh = {item.get("n") for item in items if isinstance(item, dict) and item.get("zh")}
+        for key, value in translations.items():
+            if not str(key).lstrip("-").isdigit():
+                warnings.append(f"translations key {key!r} is not a sentence number")
+                continue
+            number = int(key)
+            if number not in numbers:
+                warnings.append(f"translations[{key}] does not match any sentence in the transcript")
+            elif number in have_zh:
+                warnings.append(f"translations[{key}] is ignored: that sentence already has Chinese")
+            if not isinstance(value, str) or not value.strip():
+                warnings.append(f"translations[{key}] is empty")
+
     if not meta.get("summary"):
         warnings.append("meta.summary is empty; the overview will look bare")
     return warnings
@@ -112,10 +129,14 @@ def main(argv: list[str] | None = None) -> int:
     counts = {key: len(study.get(key) or []) for key in SECTIONS}
     items = len(transcript["items"])
     level = (study.get("meta") or {}).get("level", "—")
+    translated = len(study.get("translations") or {})
+    bilingual_source = (transcript.get("stats") or {}).get("bilingual")
 
-    print(f"[render_study] transcript: {items} sentences")
+    print(f"[render_study] transcript: {items} sentences"
+          + ("  (source has no Chinese)" if bilingual_source is False else ""))
     print(f"[render_study] study     : level={level} " +
-          " ".join(f"{name}={counts[key]}" for key, name in SECTIONS.items()))
+          " ".join(f"{name}={counts[key]}" for key, name in SECTIONS.items())
+          + (f" translations={translated}" if translated else ""))
     for warning in warnings:
         print(f"  warning   : {warning}")
 

@@ -281,6 +281,14 @@
   var patterns = study.patterns || [];
   var exercises = study.exercises || [];
   var items = transcript.items || [];
+  // an English-only source can still get a bilingual page: study.json may carry a
+  // hand-written "translations" map keyed by sentence number
+  var translations = study.translations || {};
+  items.forEach(function(it){
+    var extra = translations[it.n];
+    if (!it.zh && typeof extra === "string" && extra.trim()) it.zh = extra;
+  });
+  var hasChinese = items.some(function(it){ return !!(it.zh && it.zh.length); });
   var stem = (transcript.source && (transcript.source.stem || transcript.source.name)) || "study";
   var STORE = "englishStudy:" + stem;
 
@@ -360,6 +368,7 @@
   if (grammar.length) addBadge("语法 <strong>" + grammar.length + "</strong>");
   if (patterns.length) addBadge("句型 <strong>" + patterns.length + "</strong>");
   if (stats.englishWords) addBadge("英文 <strong>" + stats.englishWords + "</strong> 词");
+  if (!hasChinese) addBadge("纯英文原文");
   (meta.topics || []).forEach(function(t){ var c = el("span", "chip", t); badges.appendChild(c); });
 
   /* ---------- overview ---------- */
@@ -585,8 +594,7 @@
       var en = el("div", "en");
       en.appendChild(highlight(it.en || "", true));
       body.appendChild(en);
-      var zh = el("div", "zh" + (state.zh ? "" : " hide"), it.zh || "");
-      body.appendChild(zh);
+      if (it.zh) body.appendChild(el("div", "zh" + (state.zh ? "" : " hide"), it.zh));
       r1.appendChild(body);
       var acts = el("div", "acts");
       acts.appendChild(speakBtn(it.en));
@@ -607,6 +615,7 @@
     }
   }
   var zhBtn = document.getElementById("toggle-zh");
+  if (!hasChinese) zhBtn.hidden = true;   // English-only source: nothing to toggle
   function syncZh(){
     zhBtn.textContent = "中文翻译：" + (state.zh ? "显示" : "隐藏");
     zhBtn.classList.toggle("on", state.zh);
