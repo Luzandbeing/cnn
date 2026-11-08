@@ -65,11 +65,17 @@ def _bootstrap() -> Path | None:
     if probe.returncode != 0:
         print("[extract_pdf] installing pymupdf into the venv (one time)", file=sys.stderr)
         pip = venv_dir / ("Scripts/pip.exe" if os.name == "nt" else "bin/pip")
-        install = subprocess.run(
-            [str(pip), "install", "--disable-pip-version-check", "--no-input", "pymupdf"],
-            capture_output=True,
-            text=True,
-        )
+        # Prefer a prebuilt wheel: a source build compiles MuPDF and can take many
+        # minutes (and often fails when no current wheel exists for the platform).
+        install = None
+        for extra in (["--only-binary=:all:"], []):
+            install = subprocess.run(
+                [str(pip), "install", "--disable-pip-version-check", "--no-input", *extra, "pymupdf"],
+                capture_output=True,
+                text=True,
+            )
+            if install.returncode == 0:
+                break
         if install.returncode != 0:
             print(install.stdout[-2000:] + install.stderr[-2000:], file=sys.stderr)
             return None

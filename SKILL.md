@@ -66,6 +66,27 @@ python3 "$SKILL_DIR/scripts/extract_pdf.py" SOURCE.pdf --format text --pages 1-6
 5–8 pages while you draft the corresponding `study.json` sections, then continue with the
 next chunk. Re-extraction is cheap and idempotent.
 
+### 1b. Clean transcripts with block-level Chinese
+
+Some PDFs translate by paragraph instead of by sentence: a block of English, then a block
+of Chinese that covers several sentences. The extractor keeps the two glued together, so
+`en` mixes English with Chinese and the sentence boundaries are wrong. You can spot it in
+the `--format text` output: Chinese characters inside the `en` column.
+
+Fix it mechanically rather than hand-editing:
+
+```bash
+python3 "$SKILL_DIR/scripts/clean_transcript.py" \
+  "<out>/transcript.json" -o "<out>/transcript_clean.json"
+```
+
+The script removes every CJK run, re-splits the remaining English into sentences, drops
+punctuation debris, removes consecutive duplicates and renumbers 1..N. Render from
+`transcript_clean.json` and cite `ref`s from its numbering. The page then counts as an
+English-only source: keep the source's block translation only as a reference and author
+`translations` for the sentences that really need Chinese (see step 2). If the source
+already pairs one Chinese line per sentence (`bilingual: true`), do not run this script.
+
 ### 2. Author `study.json`
 
 Write the analysis yourself. Ground every item in the actual text and cite the sentence
@@ -160,21 +181,43 @@ name shows up as an empty tab. Verify before claiming success:
 - If a headless browser is available, load it and confirm rendering, e.g.
   `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --dump-dom "file://$PWD/<out>/index.html"`
   (macOS Chrome may not exit after dumping; run it in the background and kill it, or add
-  `--virtual-time-budget=4000`). Count `class="vcard"`, `class="sent"` and
-  `<details` occurrences against the study.json counts.
+  `--virtual-time-budget=4000`). Count `class="vcard"` and `class="pg"` (one per
+  sentence) against the study.json counts; `class="sent"` also appears on grammar example
+  blocks, so it over-counts.
 - Then `present` the `index.html` and tell the user what to click: 逐句精读 for reading
   with audio, 生词 for the cards and mastery tracking, 练习 for the drills.
+
+### 5. Publish to the site (optional)
+
+When the user keeps a study site — a git repo with `study/<topic>/` folders plus
+`tools/build_index.py` and `tools/publish.sh` — publish the page instead of handing over a
+loose file:
+
+```bash
+"$SKILL_DIR/scripts/publish_site.sh" "<out>" --name "2026.11.08 - Title"
+```
+
+- Site root defaults to `~/Documents/English`; set `SITE_DIR` or pass `--site DIR`.
+- The topic folder name must start with a date (`YYYY.MM.DD - Title`): the site index
+  sorts by it. `--name` overrides the default `<today> - <meta.title>`.
+- The script copies `index.html`, `study.json` and the transcript(s) into
+  `study/<topic>/`, rebuilds the site index, then runs the site's `publish.sh`
+  (commit + push to GitHub Pages). `--dry-run` stops after the local copy and index
+  rebuild.
+- Publishing is an external action on the user's public site: only run it when the user
+  asks, and report the commit hash and the live URL afterwards.
 
 ## Output layout
 
 ```
 <workspace>/study/<pdf-stem>/
-  transcript.json   # machine output, do not hand-edit
-  study.json        # your analysis, editable and re-renderable
-  index.html        # the deliverable
+  transcript.json        # machine output, do not hand-edit
+  transcript_clean.json  # only for block-level bilingual PDFs (step 1b)
+  study.json             # your analysis, editable and re-renderable
+  index.html             # the deliverable
 ```
 
-Keep the three files together: re-rendering after editing `study.json` is instant, so
+Keep these files together: re-rendering after editing `study.json` is instant, so
 never rewrite the HTML by hand.
 
 ## Page features (already implemented — do not re-invent)
@@ -205,4 +248,11 @@ never rewrite the HTML by hand.
   no approval is needed for writes outside it. Set `ENGLISH_STUDY_VENV=/some/dir` to share
   one venv across workspaces.
 - `render_study.py` is pure standard library and needs no venv.
+- If pip tries to build PyMuPDF from source (no wheel for the platform/Python), prefer a
+  prebuilt one: `pip install --only-binary=:all: pymupdf` installs the newest release that
+  ships a binary wheel. `extract_pdf.py` now tries that first and only falls back to a
+  source build.
+- Headless Chrome inside a sandbox needs writable HOME and profile dirs, or it dies with
+  "Failed to create headless user data directory". Run it with
+  `HOME="$PWD/.chrome-home"` and `--user-data-dir="$PWD/.chrome-profile"`.
 - Both scripts are safe to re-run; extraction output paths are deterministic.
